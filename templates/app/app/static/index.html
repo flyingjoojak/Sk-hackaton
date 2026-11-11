@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>업무 도구</title>
+<style>
+  :root { --bg: #fafaf8; --fg: #1d1d1b; --accent: #1f5f8b; --warn: #b3261e; --gap: 8px; }
+  body { margin: 0; padding: calc(var(--gap) * 3); background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: var(--gap); border-bottom: 1px solid #ddd; text-align: left; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .error { color: var(--warn); }
+</style>
+</head>
+<body>
+<main>
+  <h1>업무 도구</h1>
+  <p id="status">불러오는 중</p>
+</main>
+<script>
+fetch("/api/health")
+  .then(r => r.json())
+  .then(d => { document.getElementById("status").textContent = d.ok ? "서버 연결됨" : "서버 응답 이상"; })
+  .catch(() => {
+    const s = document.getElementById("status");
+    s.textContent = "서버에 연결할 수 없습니다. 서버를 다시 실행해 주세요.";
+    s.className = "error";
+  });
+</script>
+</body>
+</html>

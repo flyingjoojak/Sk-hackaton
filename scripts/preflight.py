@@ -27,10 +27,52 @@ def add(status, name, detail=""):
     print(f"[{status}] {name}" + (f" - {detail}" if detail else ""))
 
 
-def run(cmd, timeout=300):
+def _captured(proc):
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def run_pytest(ignore_templates):
+    # shell 을 쓰지 않는다. 인자는 여기 적힌 목록만이다.
     try:
-        p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=timeout)
-        return p.returncode, (p.stdout + p.stderr)
+        if ignore_templates:
+            proc = subprocess.run(
+                ["python3", "-m", "pytest", "-q", "-rN", "--ignore=templates"],
+                cwd=ROOT, capture_output=True, text=True, timeout=300, shell=False,
+            )
+        else:
+            proc = subprocess.run(
+                ["python3", "-m", "pytest", "-q", "-rN"],
+                cwd=ROOT, capture_output=True, text=True, timeout=300, shell=False,
+            )
+        return _captured(proc)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return -1, str(e)
+
+
+def run_unittest(in_tests_dir):
+    try:
+        if in_tests_dir:
+            proc = subprocess.run(
+                ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+                cwd=ROOT, capture_output=True, text=True, timeout=300, shell=False,
+            )
+        else:
+            proc = subprocess.run(
+                ["python3", "-m", "unittest", "discover", "-s", ".", "-v"],
+                cwd=ROOT, capture_output=True, text=True, timeout=300, shell=False,
+            )
+        return _captured(proc)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return -1, str(e)
+
+
+def run_git_status():
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=ROOT, capture_output=True, text=True, timeout=30, shell=False,
+        )
+        return _captured(proc)
     except (OSError, subprocess.TimeoutExpired) as e:
         return -1, str(e)
 
@@ -64,15 +106,11 @@ def check_tests():
     harness = os.path.isdir(os.path.join(ROOT, "templates", "app")) and os.path.isdir(os.path.join(ROOT, "tests"))
     if importlib.util.find_spec("pytest"):
         # pytest 는 unittest 형식 테스트도 함께 실행한다
-        cmd = [sys.executable, "-m", "pytest", "-q", "-rN"]
-        if harness:
-            cmd.append("--ignore=templates")
-        code, out = run(cmd)
+        code, out = run_pytest(harness)
         skipped = count(r"(\d+) skipped", out)
         ran = count(r"(\d+) passed", out) + count(r"(\d+) failed", out) + count(r"(\d+) error", out) + skipped
     else:
-        start = "tests" if harness else "."
-        code, out = run([sys.executable, "-m", "unittest", "discover", "-s", start, "-v"])
+        code, out = run_unittest(harness)
         ran = count(r"Ran (\d+) test", out)
         skipped = count(r"skipped=(\d+)", out)
     if ran == 0:
@@ -105,7 +143,7 @@ def check_leftovers():
         add("FAIL", "남은 것 검사", "; ".join(hits))
     else:
         add("PASS", "남은 것 검사", f"파일 {scanned}개")
-    code, out = run(["git", "status", "--porcelain"], 30)
+    code, out = run_git_status()
     if code != 0:
         tail = out.strip().splitlines()[-1] if out.strip() else str(code)
         add("FAIL", "git", f"status 실패: {tail}")

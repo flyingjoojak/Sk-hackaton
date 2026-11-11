@@ -24,12 +24,20 @@ def to_num(v):
 
 def peek_csv(path, delim):
     with open(path, newline="", encoding="utf-8-sig", errors="replace") as f:
-        rows = list(csv.reader(f, delimiter=delim))
-    if not rows:
-        print("  (빈 파일)")
-        return
-    head, body = rows[0], rows[1:MAX_ROWS + 1]
-    print(f"  행 {len(rows) - 1}, 열 {len(head)}")
+        reader = csv.reader(f, delimiter=delim)
+        try:
+            head = next(reader)
+        except StopIteration:
+            print("  (빈 파일)")
+            return
+        body = []
+        extra = False
+        for row in reader:
+            if len(body) >= MAX_ROWS:
+                extra = True
+                break
+            body.append(row)
+    print(f"  행 {len(body)}{' 이상' if extra else ''}, 열 {len(head)}")
     bad = sum(1 for r in body if len(r) != len(head))
     if bad:
         print(f"  주의: 열 개수가 헤더와 다른 행 {bad}개")
@@ -58,10 +66,24 @@ def shape(x, depth=0):
 
 
 def peek_json(path):
+    size = os.path.getsize(path)
+    if size > 2_000_000:
+        print(f"  파일이 큼 ({size:,} bytes). 앞 500자만 봅니다.")
+        with open(path, encoding="utf-8-sig", errors="replace") as f:
+            print("  ", f.read(500).replace("\n", " "))
+        return
     with open(path, encoding="utf-8-sig", errors="replace") as f:
         if path.endswith(".jsonl"):
-            lines = [l for l in f if l.strip()]
-            print(f"  줄 {len(lines)}")
+            lines = []
+            extra = False
+            for line in f:
+                if not line.strip():
+                    continue
+                if len(lines) >= 20:
+                    extra = True
+                    break
+                lines.append(line)
+            print(f"  줄 {len(lines)}{' 이상' if extra else ''}")
             if lines:
                 print("  ", json.dumps(shape(json.loads(lines[0])), ensure_ascii=False))
             return

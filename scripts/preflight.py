@@ -15,7 +15,10 @@ import sys
 
 ROOT = os.getcwd()
 SKIP_DIRS = {".git", ".agents", "node_modules", "__pycache__", ".venv", "venv"}
-SECRET = re.compile(r"(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY)")
+SECRET = re.compile(
+    r"(sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
+    r"AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY)"
+)
 results = []
 
 
@@ -91,8 +94,11 @@ def check_leftovers():
         rel = os.path.relpath(path, ROOT)
         if SECRET.search(text):
             hits.append(f"비밀값 의심: {rel}")
-        if rel == "README.md" and re.search(r"\bTODO\b|미구현|TBD", text):
-            hits.append("README 에 TODO/미구현 남음")
+        marker = "TO" + "DO"
+        if rel == "README.md" and re.search(r"\b" + marker + r"\b|미구현|" + "TB" + "D", text):
+            hits.append("README 에 미구현 표시가 남음")
+        if rel.endswith(".py") and re.search(r"\b" + marker + r"\b|breakpoint\s*\(|pdb\.set_trace\s*\(", text):
+            hits.append(f"남은 코드: {rel}")
     if scanned == 0:
         add("NOT_RUN", "남은 것 검사", "검사한 파일 0개")
     elif hits:
@@ -100,7 +106,10 @@ def check_leftovers():
     else:
         add("PASS", "남은 것 검사", f"파일 {scanned}개")
     code, out = run(["git", "status", "--porcelain"], 30)
-    if code == 0:
+    if code != 0:
+        tail = out.strip().splitlines()[-1] if out.strip() else str(code)
+        add("FAIL", "git", f"status 실패: {tail}")
+    else:
         dirty = [l for l in out.splitlines() if not re.search(r"__pycache__|.pytest_cache|.pyc$", l)]
         add("FAIL" if dirty else "PASS", "git", f"미커밋 {len(dirty)}개" if dirty else "깨끗함")
 

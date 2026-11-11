@@ -38,11 +38,11 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET":
                 return self._static(path)
             return self._send(404, {"error": "없는 주소입니다"})
-        length = int(self.headers.get("Content-Length") or 0)
-        if length > MAX_BODY:
-            return self._send(413, {"error": "파일이 너무 큽니다"})
-        raw = self.rfile.read(length) if length else b""
         try:
+            length = body_length(self.headers.get("Content-Length"))
+            if length > MAX_BODY:
+                return self._send(413, {"error": "파일이 너무 큽니다"})
+            raw = self.rfile.read(length) if length else b""
             body = json.loads(raw) if raw and "json" in (self.headers.get("Content-Type") or "") else raw
             code, payload = fn(body)
         except ValueError as e:  # 입력 검증 실패는 400 으로 이유를 돌려준다
@@ -63,9 +63,29 @@ class Handler(BaseHTTPRequestHandler):
         self._handle("POST")
 
 
+def body_length(header):
+    """Content-Length. 없거나 0이면 본문 없음. 음수와 글자는 거부한다."""
+    if header is None or str(header).strip() == "":
+        return 0
+    try:
+        length = int(str(header).strip())
+    except ValueError:
+        raise ValueError("Content-Length 가 숫자가 아닙니다") from None
+    if length < 0:
+        raise ValueError("Content-Length 가 음수입니다")
+    return length
+
+
 def make_server(port=None):
     # 0.0.0.0 이어야 컨테이너 밖에서 접속된다
-    return ThreadingHTTPServer(("0.0.0.0", int(port if port is not None else os.getenv("PORT", "8000"))), Handler)
+    raw = port if port is not None else os.getenv("PORT", "8000")
+    try:
+        number = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("PORT 가 숫자가 아닙니다") from None
+    if number < 0 or number > 65535:
+        raise ValueError("PORT 범위가 아닙니다")
+    return ThreadingHTTPServer(("0.0.0.0", number), Handler)
 
 
 if __name__ == "__main__":

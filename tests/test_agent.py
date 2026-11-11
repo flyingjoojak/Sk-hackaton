@@ -55,8 +55,8 @@ class AgentTest(unittest.TestCase):
     def test_failure_diff(self):
         companies = {"B": {"country": "ZZ"}, "C": {"country": "KR"}}
         result = r.reanalyze(g.SAMPLE, companies, {"type": "supplier_failure", "company_id": "B"})
-        self.assertEqual(result["diff"]["added"], [("A", "wafer", "C")])
-        self.assertEqual(result["diff"]["removed"], [("A", "gas", "B"), ("E", "wafer", "B")])
+        self.assertEqual(result["diff"]["added"], [("A", "wafer", "2026", "C")])
+        self.assertEqual(result["diff"]["removed"], [("A", "gas", "2026", "B"), ("E", "wafer", "2026", "B")])
         country = r.reanalyze(g.SAMPLE, companies, {"type": "country_control", "country": "ZZ"})
         self.assertEqual(country["diff"], result["diff"])
         self.assertIn("추가 A / wafer / C", r.explain(result))
@@ -73,11 +73,35 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(sorted(row["supplier"] for row in kept), ["B", "C"])
         self.assertEqual(note["skipped_no_qty"], 0)
         result = r.reanalyze(rows, {}, {"type": "price_cap", "product": "wafer", "max_unit_price": 1000})
-        self.assertEqual(result["diff"]["added"], [("A", "wafer", "C")])
+        self.assertEqual(result["diff"]["added"], [("A", "wafer", "2026", "C")])
 
     def test_example_json(self):
         obj = json.loads((ROOT / "templates" / "agent" / "conditions.example.json").read_text(encoding="utf-8"))
         self.assertEqual(r.validate_condition(obj)["type"], "supplier_failure")
+
+    def test_particle_negation_and_unknown(self):
+        cond, _ = r.parse_request("거래처 B가 부도", allow_env=False)
+        self.assertEqual(cond["company_id"], "B")
+        cond, _ = r.parse_request("국가 ZZ에서 수출통제", allow_env=False)
+        self.assertEqual(cond["country"], "ZZ")
+        with self.assertRaises(ValueError):
+            r.parse_request("거래처 B 부도 아님", allow_env=False)
+        with self.assertRaises(ValueError):
+            r.reanalyze(g.SAMPLE, {"B": {"country": "ZZ"}}, {"type": "supplier_failure", "company_id": "없는회사"})
+        with self.assertRaises(ValueError):
+            r.validate_condition({"type": ["supplier_failure"], "company_id": "B"})
+        with self.assertRaises(ValueError):
+            r.validate_condition({"type": "price_cap", "product": "wafer", "max_unit_price": "nan"})
+        with self.assertRaises(ValueError):
+            r.check_llm_base("http://example.com/v1")
+        r.check_llm_base("http://127.0.0.1:8000/v1")
+
+        def boom(_text):
+            raise OSError("down")
+
+        with self.assertRaises(ValueError) as ctx:
+            r.parse_request("문을 닫았다", llm=boom, allow_env=False)
+        self.assertIn("LLM 실패", str(ctx.exception))
 
     def test_cli(self):
         proc = subprocess.run(

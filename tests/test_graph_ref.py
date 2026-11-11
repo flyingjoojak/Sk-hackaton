@@ -67,10 +67,10 @@ class GraphRefTest(unittest.TestCase):
         before = g.single_source(cleaned, 1.0)
         after_edges = g.without_suppliers(cleaned, ["B"])
         after = g.single_source(after_edges, 1.0)
-        self.assertEqual(g.diff_single(before, after)["added"], [("A", "wafer", "C")])
+        self.assertEqual(g.diff_single(before, after)["added"], [("A", "wafer", "2026", "C")])
         self.assertEqual(
             g.diff_single(before, after)["removed"],
-            [("A", "gas", "B"), ("E", "wafer", "B")],
+            [("A", "gas", "2026", "B"), ("E", "wafer", "2026", "B")],
         )
         # 원본 간선 수는 그대로다.
         self.assertEqual(len(cleaned), 5)
@@ -148,12 +148,69 @@ class GraphRefTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("OK", proc.stdout)
 
+    def test_period_not_mixed(self):
+        cleaned, _ = g.clean_edges([
+            {"buyer": "A", "supplier": "B", "product": "wafer", "amount": 100, "period": "2025"},
+            {"buyer": "A", "supplier": "B", "product": "wafer", "amount": 50, "period": "2026"},
+            {"buyer": "A", "supplier": "C", "product": "wafer", "amount": 50, "period": "2026"},
+        ])
+        hhi = {r["period"]: r["hhi"] for r in g.concentration(cleaned)}
+        self.assertAlmostEqual(hhi["2025"], 1.0)
+        self.assertAlmostEqual(hhi["2026"], 0.5)
+        self.assertEqual([r["supplier"] for r in g.alternatives(cleaned, "wafer", period="2025")], ["B"])
+
+    def test_later_supplier_loss_and_products(self):
+        # C 는 B 와 같은 깊이지만 A 에게도 공급한다. 그 직접 금액은 A 의 손실에 넣는다.
+        cleaned, _ = g.clean_edges([
+            {"buyer": "A", "supplier": "B", "product": "wafer", "amount": 100, "period": "2026"},
+            {"buyer": "C", "supplier": "B", "product": "wafer", "amount": 10, "period": "2026"},
+            {"buyer": "A", "supplier": "C", "product": "gas", "amount": 5, "period": "2026"},
+        ])
+        affected = {r["id"]: r for r in g.propagate(cleaned, ["B"], max_depth=3)["affected"]}
+        self.assertEqual(affected["A"]["lost"], 105.0)
+        self.assertEqual(
+            [(p["product"], p["amount"]) for p in affected["A"]["products"]],
+            [("gas", 5.0), ("wafer", 100.0)],
+        )
+        self.assertEqual(g.validate(cleaned, g.analyze(cleaned, failed=["B"]), failed=["B"]), [])
+
+    def test_nonfinite_and_duplicate_company(self):
+        with self.assertRaises(ValueError):
+            g.clean_edges([
+                {"buyer": "A", "supplier": "B", "product": "x", "amount": float("nan"), "period": "2026"},
+            ])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "companies.csv").write_text(
+                "company_id,name,country,industry\nB,하나,ZZ,소재\nB,둘,KR,소재\n",
+                encoding="utf-8",
+            )
+            (root / "transactions.csv").write_text(
+                "buyer_id,supplier_id,product,amount,period\nA,B,wafer,1,2026\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                g.load_dir(root)
+
     def test_centrality_hand(self):
         # 노드 5, 분모 4. B 의 구매자는 A,E 두 곳.
         cleaned, _ = edges()
         cen = g.degree_centrality(cleaned)
         self.assertAlmostEqual(cen["B"]["out"], 0.5)
         self.assertAlmostEqual(cen["A"]["in"], 0.5)
+
+
+class ServerLimitTest(unittest.TestCase):
+    def test_body_length(self):
+        sys.path.insert(0, str(ROOT / "templates" / "app"))
+        from app.server import body_length
+
+        self.assertEqual(body_length(None), 0)
+        self.assertEqual(body_length("12"), 12)
+        with self.assertRaises(ValueError):
+            body_length("-1")
+        with self.assertRaises(ValueError):
+            body_length("nope")
 
 
 class PeekTest(unittest.TestCase):

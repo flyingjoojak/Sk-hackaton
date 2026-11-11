@@ -9,6 +9,7 @@ transactions.csv: buyer_id,supplier_id,product,amount,period
 과제 코드에 그대로 복사하지 말고 구조를 참고해 다시 짠다.
 """
 import csv
+import math
 import sys
 from pathlib import Path
 
@@ -20,9 +21,12 @@ def load_csv(path):
 
 def _amount(text, where):
     try:
-        return float(str(text).replace(",", "").strip())
+        value = float(str(text).replace(",", "").strip())
     except (TypeError, ValueError):
         raise ValueError(f"금액이 숫자가 아님: {where}") from None
+    if isinstance(text, bool) or not math.isfinite(value):
+        raise ValueError(f"유한한 금액이 아님: {where}")
+    return value
 
 
 def load_dir(folder):
@@ -33,6 +37,8 @@ def load_dir(folder):
         cid = (row.get("company_id") or "").strip()
         if not cid:
             raise ValueError(f"companies.csv {i}행: company_id 없음")
+        if cid in companies:
+            raise ValueError(f"companies.csv {i}행: company_id 중복 {cid}")
         companies[cid] = {
             "name": (row.get("name") or "").strip(),
             "country": (row.get("country") or "").strip(),
@@ -68,7 +74,10 @@ def clean_edges(tx):
             "amount": row["amount"],
             "period": row.get("period", ""),
         }
-        if item["amount"] <= 0:
+        amount = item["amount"]
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount):
+            raise ValueError("유한한 금액이 아님")
+        if amount <= 0:
             dropped.append({"reason": "amount<=0", "row": item})
             continue
         if item["buyer"] == item["supplier"]:
@@ -100,44 +109,46 @@ def build_graph(edges):
 
 
 def _groups(edges):
-    """(buyer, product) -> {supplier: amount}. 호출하는 쪽 입력을 바꾸지 않는다."""
+    """(buyer, product, period) -> {supplier: amount}. 기간을 섞지 않는다."""
     grouped = {}
     for e in edges:
-        parts = grouped.setdefault((e["buyer"], e["product"]), {})
+        key = (e["buyer"], e["product"], e.get("period", ""))
+        parts = grouped.setdefault(key, {})
         parts[e["supplier"]] = parts.get(e["supplier"], 0.0) + e["amount"]
     return grouped
 
 
 def concentration(edges):
-    """구매자·자재별 HHI = 비중 제곱합. 0~1. 합이 0이면 hhi 는 None."""
+    """구매자·자재·기간별 HHI = 비중 제곱합. 0~1. 합이 0이면 hhi 는 None."""
     rows = []
-    for (buyer, product), parts in _groups(edges).items():
+    for (buyer, product, period), parts in _groups(edges).items():
         total = sum(parts.values())
         if total <= 0:
             hhi = None
             top_s, top_share = "", None
         else:
             hhi = sum((a / total) ** 2 for a in parts.values())
-            top_s, top_a = max(parts.items(), key=lambda kv: (-kv[1], kv[0]))
+            top_s, top_a = sorted(parts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
             top_share = top_a / total
         ordered = tuple(sorted(parts.items(), key=lambda kv: (-kv[1], kv[0])))
         rows.append({
             "buyer": buyer,
             "product": product,
+            "period": period,
             "total": total,
             "hhi": hhi,
             "top_supplier": top_s,
             "top_share": top_share,
             "parts": ordered,
         })
-    rows.sort(key=lambda r: (r["hhi"] is None, -(r["hhi"] or 0), -r["total"], r["buyer"], r["product"]))
+    rows.sort(key=lambda r: (r["hhi"] is None, -(r["hhi"] or 0), -r["total"], r["buyer"], r["product"], r["period"]))
     return rows
 
 
 def single_source(edges, threshold=1.0):
     """비중 >= threshold 인 공급처. 같으면 포함한다."""
     found = []
-    for (buyer, product), parts in _groups(edges).items():
+    for (buyer, product, period), parts in _groups(edges).items():
         total = sum(parts.values())
         if total <= 0:
             continue
@@ -147,11 +158,12 @@ def single_source(edges, threshold=1.0):
                 found.append({
                     "buyer": buyer,
                     "product": product,
+                    "period": period,
                     "supplier": supplier,
                     "share": share,
                     "amount": amount,
                 })
-    found.sort(key=lambda r: (r["buyer"], r["product"], -r["share"], r["supplier"]))
+    found.sort(key=lambda r: (r["buyer"], r["product"], r["period"], -r["share"], r["supplier"]))
     return found
 
 
@@ -197,49 +209,54 @@ def degree_centrality_nx(edges):
 def propagate(edges, failed, max_depth=3):
     """중단 기업(깊이 0)에서 구매자 방향으로 BFS. 깊이 == max_depth 까지 포함한다.
 
-    lost 는 그 기업으로 들어오는 간선 중, 이미 도달한 공급자의 금액만 더한 값이다.
-    간접 금액은 다시 더하지 않는다.
+    lost 는 도달한 공급자에게서 그 기업으로 들어오는 직접 금액 합이다.
+    먼저 도달한 경로만 보지 않는다. 자재별로 products 에 남긴다.
+    하류 손실을 상류에 다시 더하지는 않는다.
     """
     failed = list(dict.fromkeys(failed))
-    adj = {}
+    buyers_of = {}
     for e in edges:
-        adj.setdefault(e["supplier"], {})
-        slot = adj[e["supplier"]]
-        slot[e["buyer"]] = slot.get(e["buyer"], 0.0) + e["amount"]
+        buyers_of.setdefault(e["supplier"], set()).add(e["buyer"])
     depth = {f: 0 for f in failed}
-    lost = {f: 0.0 for f in failed}
     frontier = list(failed)
     while frontier:
         found = {}
         for u in frontier:
             if depth[u] >= max_depth:
                 continue
-            for v, amt in adj.get(u, {}).items():
-                if v in depth:
+            for v in buyers_of.get(u, ()):
+                if v in depth or v in found:
                     continue
-                if v not in found:
-                    found[v] = [depth[u] + 1, 0.0]
-                found[v][1] += amt
+                found[v] = depth[u] + 1
         frontier = []
-        for v, (d, amt) in found.items():
+        for v, d in found.items():
             depth[v] = d
-            lost[v] = amt
             frontier.append(v)
-    affected = [
-        {"id": i, "depth": depth[i], "lost": lost[i]}
-        for i in depth
-        if depth[i] > 0
-    ]
+    reached = set(depth)
+    lost = {i: 0.0 for i in depth if depth[i] > 0}
+    products = {i: {} for i in lost}
+    for e in edges:
+        if e["buyer"] not in lost or e["supplier"] not in reached:
+            continue
+        lost[e["buyer"]] += e["amount"]
+        slot = products[e["buyer"]]
+        slot[e["product"]] = slot.get(e["product"], 0.0) + e["amount"]
+    affected = []
+    for i in lost:
+        plist = [{"product": p, "amount": a} for p, a in sorted(products[i].items())]
+        affected.append({"id": i, "depth": depth[i], "lost": lost[i], "products": plist})
     affected.sort(key=lambda r: (r["depth"], r["id"]))
     return {"failed": failed, "affected": affected}
 
 
-def alternatives(edges, product, exclude=()):
-    """같은 자재를 공급하는 기업. exclude 와 금액 내림차순, 동률이면 id."""
+def alternatives(edges, product, exclude=(), period=None):
+    """같은 자재를 공급하는 기업. period 를 주면 그 기간만. exclude 와 금액 내림차순, 동률이면 id."""
     ban = set(exclude)
     totals = {}
     for e in edges:
         if e["product"] != product or e["supplier"] in ban:
+            continue
+        if period is not None and e.get("period", "") != period:
             continue
         totals[e["supplier"]] = totals.get(e["supplier"], 0.0) + e["amount"]
     rows = [{"supplier": s, "amount": a} for s, a in totals.items()]
@@ -259,8 +276,11 @@ def without_suppliers(edges, supplier_ids):
 
 
 def diff_single(before, after):
-    b = {(r["buyer"], r["product"], r["supplier"]) for r in before}
-    a = {(r["buyer"], r["product"], r["supplier"]) for r in after}
+    def key(r):
+        return (r["buyer"], r["product"], r.get("period", ""), r["supplier"])
+
+    b = {key(r) for r in before}
+    a = {key(r) for r in after}
     return {"added": sorted(a - b), "removed": sorted(b - a)}
 
 
@@ -299,33 +319,50 @@ def _bfs_pairs(edges, failed, max_depth):
 
 
 def validate(edges, report, threshold=1.0, failed=None, max_depth=3):
-    """report 를 원본 간선으로 다시 계산해 어긋나면 이유 문자열을 돌려준다."""
+    """HHI, 공급 비중, 단일 공급, 전파 깊이, 직접 손실, 자재 내역을 다시 센다.
+
+    중심성과 build_graph 결과는 검사하지 않는다.
+    """
     errors = []
     grouped = {}
     for e in edges:
-        grouped.setdefault((e["buyer"], e["product"]), {})
-        parts = grouped[(e["buyer"], e["product"])]
+        key = (e["buyer"], e["product"], e.get("period", ""))
+        parts = grouped.setdefault(key, {})
         parts[e["supplier"]] = parts.get(e["supplier"], 0.0) + e["amount"]
 
-    got = {(r["buyer"], r["product"]): r["hhi"] for r in report["concentration"]}
+    got = {
+        (r["buyer"], r["product"], r.get("period", "")): r
+        for r in report["concentration"]
+    }
     if set(got) != set(grouped):
         errors.append("concentration 키가 간선과 다름")
     for key, parts in grouped.items():
         total = sum(parts.values())
         expect = sum((a / total) ** 2 for a in parts.values()) if total > 0 else None
-        got_h = got.get(key)
+        row = got.get(key)
+        got_h = None if row is None else row.get("hhi")
         if expect is None or got_h is None or abs(got_h - expect) > 1e-9:
-            errors.append(f"hhi {key[0]}/{key[1]}")
+            errors.append(f"hhi {key[0]}/{key[1]}/{key[2]}")
+            continue
+        expect_parts = tuple(sorted(parts.items(), key=lambda kv: (-kv[1], kv[0])))
+        if row.get("parts") != expect_parts:
+            errors.append(f"parts {key[0]}/{key[1]}/{key[2]}")
+        top = expect_parts[0][1] / total
+        if row.get("top_share") is None or abs(row["top_share"] - top) > 1e-9:
+            errors.append(f"top_share {key[0]}/{key[1]}/{key[2]}")
 
     expect_single = set()
-    for (buyer, product), parts in grouped.items():
+    for (buyer, product, period), parts in grouped.items():
         total = sum(parts.values())
         if total <= 0:
             continue
         for supplier, amount in parts.items():
             if amount / total + 1e-12 >= threshold:  # 같으면 포함
-                expect_single.add((buyer, product, supplier))
-    got_single = {(r["buyer"], r["product"], r["supplier"]) for r in report["single"]}
+                expect_single.add((buyer, product, period, supplier))
+    got_single = {
+        (r["buyer"], r["product"], r.get("period", ""), r["supplier"])
+        for r in report["single"]
+    }
     if got_single != expect_single:
         errors.append("단일 공급 집합이 다름")
 
@@ -337,14 +374,21 @@ def validate(edges, report, threshold=1.0, failed=None, max_depth=3):
         depths = {fid: 0 for fid in dict.fromkeys(failed)}
         depths.update({i: d for i, d in expect_pairs})
         for row in report["propagation"]["affected"]:
-            # 손실은 한 단계 위 공급자의 직접 금액만. propagate 의 합과 다른 루프다.
-            expect_lost = sum(
-                e["amount"]
-                for e in edges
-                if e["buyer"] == row["id"] and depths.get(e["supplier"]) == row["depth"] - 1
-            )
+            direct = [
+                e for e in edges
+                if e["buyer"] == row["id"] and e["supplier"] in depths
+            ]
+            expect_lost = sum(e["amount"] for e in direct)
             if abs(expect_lost - row["lost"]) > 1e-6:
                 errors.append(f"손실 금액 {row['id']}")
+            expect_prod = {}
+            for e in direct:
+                expect_prod[e["product"]] = expect_prod.get(e["product"], 0.0) + e["amount"]
+            got_prod = {p["product"]: p["amount"] for p in row.get("products", [])}
+            if set(got_prod) != set(expect_prod) or any(
+                abs(got_prod[p] - expect_prod[p]) > 1e-6 for p in expect_prod
+            ):
+                errors.append(f"자재 내역 {row['id']}")
     return errors
 
 

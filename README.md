@@ -59,6 +59,7 @@ tools/peek.py             CSV, JSON 구조 훑기
 tools/graph_ref.py        거래 그래프 참고 구현과 독립 검사기
 scripts/preflight.py      환경 점검, 제출 전 점검 (exit 0 / 1 / 2)
 templates/app/            뼈대: 표준 라이브러리 웹 서버, Dockerfile, 테스트
+templates/agent/          조건 문장 → JSON → 재분석 diff. LLM 은 키가 있을 때만
 ```
 
 연습은 `python3 tools/graph_ref.py` 와 `docs/예상문제.md` 한 문제를 고르는 것으로 한다.
@@ -67,6 +68,7 @@ templates/app/            뼈대: 표준 라이브러리 웹 서버, Dockerfile,
 
 ```
 python3 tools/graph_ref.py
+python3 templates/agent/reanalyze.py
 python3 -m unittest discover -s tests -v
 python3 scripts/preflight.py
 python3 scripts/preflight.py submit
